@@ -1,0 +1,329 @@
+package com.xuan.nodes;
+
+import com.xuan.functions.AggregateFunction;
+import com.xuan.functions.FilterFunction;
+import com.xuan.functions.MapFunction;
+import com.xuan.messages.BatchMessage;
+import com.xuan.messages.Message;
+import com.xuan.messages.source.KafkaSourceMsg;
+import com.xuan.messages.source.KafkaSourceMsgWithDelay;
+import com.xuan.messages.source.StopSourceMsg;
+import com.xuan.utils.KafkaSource;
+import com.xuan.workers.Aggregate;
+import com.xuan.workers.Filter;
+import com.xuan.workers.Mapf;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+
+import java.text.SimpleDateFormat;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+
+/**
+ * Created with IntelliJ IDEA.
+ *
+ * @Author: Xu1Aan
+ * @Date: 2023/03/20/15:35
+ * @Description:
+ */
+public class Source {
+
+    private int sleepTime = 400;
+
+    private volatile boolean running = true;
+    private volatile boolean suspended = false;
+    private List<Mapf> mapWorkers;
+    private List<Filter> filterWorkers;
+    private List<Aggregate> aggregateWorkers;
+    private Sink sink;
+
+    private int total = 0;
+
+
+    private List<Message> batchQueue = new ArrayList<>();
+    private List <Message> nextbatchQueue = new ArrayList<>();
+
+    private long startTime=0;
+    private long delay=0;
+    private long waterMark=0;
+
+    public Source() {
+        super();
+    }
+
+    public Source(int sleepTime,long startTime,long delay) {
+        this.sleepTime = sleepTime;
+        this.startTime=startTime;
+        this.delay = delay;
+    }
+
+    public Source(List<Mapf> mapWorkers, List<Filter> filterWorkers, List<Aggregate> aggregateWorkers,
+                  Sink sink) {
+        this.mapWorkers = mapWorkers;
+        this.filterWorkers = filterWorkers;
+        this.aggregateWorkers = aggregateWorkers;
+        this.sink = sink;
+    }
+
+    private void stopSource(StopSourceMsg message) { running = false; }
+
+    public void onKafkaMsg(KafkaSourceMsg message){
+        running = true;
+        suspended = false;
+        new Thread(() -> {
+            startTime = System.currentTimeMillis() / 1000;
+            while(running) {
+                System.out.println("running");
+                KafkaSource kafkaSource = new KafkaSource(message.getTopic());
+                KafkaConsumer<String, String> consumer = kafkaSource.getConsumer();
+                long size = message.getSize();
+                while (true) {
+                    ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
+                    if (!suspended) {
+                        for (ConsumerRecord<String, String> record : records) {
+                            //下面写处理逻辑
+                            String kfkLine = record.value();
+                            if (kfkLine.length() != 0) {
+                                readWindowMessage(kfkLine,size);
+                            }
+                            //提交偏移量，要不然会一直重复消费
+                            consumer.commitSync();
+                        }
+                    }
+                }
+            }
+        }).start();
+    }
+
+    public void onKafkaMsgWithDelay(KafkaSourceMsgWithDelay message){
+        running = true;
+        suspended = false;
+        new Thread(() -> {
+            System.out.println("reach onKafkaMsgWithDelay");
+            delay = message.getDelay();
+            while(running) {
+                KafkaSource kafkaSource = new KafkaSource(message.getTopic());
+                KafkaConsumer<String, String> consumer = kafkaSource.getConsumer();
+                long size = message.getSize();
+                while (true) {
+                    ConsumerRecords<String, String> records = consumer.poll(100);
+                    if (!suspended) {
+                        try {
+                            for (ConsumerRecord<String, String> record : records) {
+                                //下面写处理逻辑
+                                String kfkLine = record.value();
+                                if (kfkLine.length() != 0) {
+                                    readWindowMessageWithDelay(kfkLine,size);
+                                }
+                                //提交偏移量，要不然会一直重复消费
+                                consumer.commitSync();
+                            }
+                        } catch (Exception e) {
+                            running = false;
+                        }
+                    }
+                }
+            }
+        }).start();
+    }
+
+    private void readWindowMessage(String line, long size) {
+        //取出kv对，封装成Message
+
+        String [] content =line.trim().split(",");
+        String key = content[1];
+        String value = content[2];
+
+        Message msg = new Message(key, value);
+        System.out.println(msg);
+        sendWindowMessage(msg,size);
+    }
+
+    private void sendWindowMessage(Message msg, long size) {
+        long curTime = System.currentTimeMillis() / 1000;
+        //如果当前时间超过了窗口的结束时间，窗口关闭
+        if(startTime+size<=curTime){
+
+            long end = startTime+size;
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+            String date_string = sdf.format(new Date(end * 1000L));
+            String info = "Window end time:"+date_string+" windowsize:"+size+"s"+"\n";
+            //更新startTime,为<=currentTime的最大的开始时间
+            while (startTime+size<=curTime){
+                startTime=startTime+size;
+            }
+            //把该批数据发往下游
+            if(batchQueue.size()!=0) {
+                BatchMessage batchMsg = new BatchMessage(batchQueue,info);
+
+                if (mapWorkers.size()!=0){
+                    int receiver = Math.abs(batchQueue.get(0).getKey().hashCode()) % mapWorkers.size();
+                    Mapf mapWorker = mapWorkers.get(receiver);
+                    batchMsg = mapWorker.onBatchMessage(batchMsg);
+                }
+                if (filterWorkers.size()!=0){
+                    int receiver = Math.abs(batchQueue.get(0).getKey().hashCode()) % filterWorkers.size();
+                    Filter filterWorker = filterWorkers.get(receiver);
+                    batchMsg = filterWorker.onBatchMessage(batchMsg);
+                }
+                if (aggregateWorkers.size()!=0){
+                    int receiver = Math.abs(batchQueue.get(0).getKey().hashCode()) % aggregateWorkers.size();
+                    Aggregate aggregateWorker = aggregateWorkers.get(receiver);
+                    batchMsg = aggregateWorker.onBatchMessage(batchMsg);
+                }
+
+
+
+                System.out.println("batchMessage.getBatchInfo():"+batchMsg.getBatchInfo());
+                //打印这一批消息的信息
+                total += batchMsg.getMessages().size();
+                System.out.println("Source sending batch " + batchMsg);
+                System.out.println(String.format("Total messages: %d", total));
+
+                try {
+                    sink.onBatchMessage(batchMsg);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+
+                //清空队列，加入当前一条新的消息
+                batchQueue.clear();
+                batchQueue.add(msg);
+            }
+        }
+        else{
+            //不触发窗口，只添加消息就好
+            batchQueue.add(msg);
+        }
+    }
+
+    private void readWindowMessageWithDelay(String Line, long size) throws Exception {
+        String [] content =Line.trim().split(",");
+        String time = content[0];
+        String key = content[1];
+        String value = content[2];
+
+        Message msg = new Message(time + "," + key, value);
+        sendWindowMessageWithDelay(msg,size);
+    }
+
+    private void sendWindowMessageWithDelay(Message msg, long size) throws Exception {
+        //watermark和当前message的事件时间比较，更新watermark
+        long eventTime = Long.parseLong(msg.getKey().split(",")[0]);
+        System.out.println("eventTime:"+eventTime);
+        //重新封装一个Message对象
+        Message m = new Message(msg.getKey().split(",")[1],msg.getVal());
+        waterMark = Math.max(waterMark,eventTime);
+        //如果判断时间超过了窗口的结束
+        //触发窗口的条件换成了当前窗口的结束时间+触发时延<=watermark
+        System.out.println("startTime:"+startTime);
+        //在下一个窗口范围内，但是>watermark
+        if(startTime+size+delay<=waterMark&&startTime+size*2>waterMark){
+            //watermark落到下个window并触发该次window的计算，注意当前元素添加进batchQueue
+            delayWindowTrigger(getTimeInfo(size));
+
+            System.out.println("batchQueue=nextbatchQueue");
+            batchQueue.clear();
+            for (Message message : nextbatchQueue) {
+                batchQueue.add(message);
+            }
+            System.out.println("nextbatchQueueClear");
+            nextbatchQueue.clear();
+            System.out.println("batchQueueadd");
+            batchQueue.add(m);
+            startTime=startTime+size;
+        }
+        //watermark落到下下个window但还没触发,触发该次window
+        else if(startTime+size*2<=waterMark&&startTime+size*2+delay>waterMark){
+            delayWindowTrigger(getTimeInfo(size));
+            System.out.println("batchQueue=nextbatchQueue");
+            batchQueue.clear();
+            for (Message message : nextbatchQueue) {
+                batchQueue.add(message);
+            }
+            System.out.println("nextbatchQueueClear");
+            nextbatchQueue.clear();
+            System.out.println("nextbatchQueueadd");
+            nextbatchQueue.add(m);
+            startTime=startTime+size;
+        }
+        else if(waterMark>=startTime+size*2+delay){
+            delayWindowTrigger(getTimeInfo(size));
+
+            startTime=startTime+size;
+            System.out.println("batchQueue=nextbatchQueue");
+            batchQueue.clear();
+            for (Message message : nextbatchQueue) {
+                batchQueue.add(message);
+            }
+            delayWindowTrigger(getTimeInfo(size));
+            //把startTime更新至比waterMark小的最大的窗口
+            while (startTime+size<waterMark){
+                startTime=startTime+size;
+            }
+            batchQueue.clear();
+            nextbatchQueue.clear();
+            batchQueue.add(m);
+        }
+        else{
+            //添加进本窗口
+            if(startTime+size>eventTime&&eventTime>=startTime){
+                System.out.println("batchQueue.add");
+                batchQueue.add(m);
+            }
+            //添加进下一个窗口
+            else if(eventTime>=startTime+size&&eventTime<startTime+size+delay){
+                System.out.println("nextbatchQueue.add");
+                nextbatchQueue.add(m);
+            }
+        }
+    }
+
+    //因为网络传输的时延问题，会出现打印窗口信息先于窗口数据出现，以及连续打印两个窗口信息，再连续打印两个窗口的数据，所以修改代码结构拆成两个方法Z加个锁试试
+    //窗口触发的函数，把当前窗口清空
+    public void delayWindowTrigger(String info){
+        //把该批数据发往下游
+        if(batchQueue.size()!=0) {
+            BatchMessage batchMsg = new BatchMessage(batchQueue,info);
+
+            /*final int receiver = Math.abs(batchQueue.get(0).getKey().hashCode()) % downstream.size();
+            //发送到下游
+            downstream.get(receiver).tell(batchMsg, self());*/
+            if (mapWorkers.size()!=0){
+                int receiver = Math.abs(batchQueue.get(0).getKey().hashCode()) % mapWorkers.size();
+                Mapf mapWorker = mapWorkers.get(receiver);
+                batchMsg = mapWorker.onBatchMessage(batchMsg);
+            }
+            if (filterWorkers.size()!=0){
+                int receiver = Math.abs(batchQueue.get(0).getKey().hashCode()) % filterWorkers.size();
+                Filter filterWorker = filterWorkers.get(receiver);
+                batchMsg = filterWorker.onBatchMessage(batchMsg);
+            }
+            if (aggregateWorkers.size()!=0){
+                int receiver = Math.abs(batchQueue.get(0).getKey().hashCode()) % aggregateWorkers.size();
+                Aggregate aggregateWorker = aggregateWorkers.get(receiver);
+                batchMsg = aggregateWorker.onBatchMessage(batchMsg);
+            }
+
+            System.out.println("batchMessage.getBatchInfo():"+batchMsg.getBatchInfo());
+            //打印这一批消息的信息
+
+            total += batchMsg.getMessages().size();
+            System.out.println("Source sending batch " + batchMsg);
+            System.out.println(String.format("Total messages: %d", total));
+        }
+    }
+    public String getTimeInfo(long size) throws Exception {
+        //startTime是当前窗口的开始时间
+        long end = startTime+size;
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+        String date_string = sdf.format(new Date(end * 1000L));
+        String info = "Window end time:"+date_string+" windowsize:"+size+"s"+" delay:"+delay+" cur_watermark:"+waterMark+"\n";
+
+        return info;
+    }
+
+}

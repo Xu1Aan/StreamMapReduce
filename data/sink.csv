@@ -1,0 +1,100 @@
+
+key,value
+flink,52
+spark,20
+hadoop,52
+presto,1
+Window end time:2023-03-21 15:24:39 windowsize:10s
+
+flink,52
+spark,20
+hadoop,52
+presto,1
+flink,2
+Window end time:2023-03-21 15:24:49 windowsize:10s
+
+flink,52
+spark,20
+hadoop,52
+presto,1
+flink,2
+flink,52
+spark,22
+hadoop,52
+presto,1
+Window end time:2023-03-21 15:24:59 windowsize:10s
+
+flink,52
+spark,20
+hadoop,52
+presto,1
+flink,2
+flink,52
+spark,22
+hadoop,52
+presto,1
+flink,52
+spark,24
+hadoop,52
+presto,1
+Window end time:2023-03-21 15:25:09 windowsize:10s
+
+key,value
+flink,86
+spark,30
+hadoop,65
+presto,1
+Window end time:2023-03-21 15:28:21 windowsize:10s
+
+flink,86
+spark,30
+hadoop,65
+presto,1
+flink,2
+Window end time:2023-03-21 15:28:31 windowsize:10s
+
+flink,86
+spark,30
+hadoop,65
+presto,1
+flink,2
+flink,86
+spark,30
+hadoop,68
+presto,1
+Window end time:2023-03-21 15:28:41 windowsize:10s
+
+flink,86
+spark,30
+hadoop,65
+presto,1
+flink,2
+flink,86
+spark,30
+hadoop,68
+presto,1
+flink,90
+spark,34
+hadoop,68
+presto,1
+Window end time:2023-03-21 15:29:01 windowsize:10s
+
+flink,86
+spark,30
+hadoop,65
+presto,1
+flink,2
+flink,86
+spark,30
+hadoop,68
+presto,1
+flink,90
+spark,34
+hadoop,68
+presto,1
+flink,90
+spark,34
+hadoop,70
+presto,1
+Window end time:2023-03-21 15:30:01 windowsize:10s
+
